@@ -24,6 +24,7 @@ class VoltArticulate(nn.Module):
         num_seg_classes=100,
         backbone=None,
         freeze_backbone=False,
+        freeze_seg_head=False,  # MODIFIED: NEW - option to freeze semantic seg head
     ):
         """
         Args:
@@ -31,11 +32,13 @@ class VoltArticulate(nn.Module):
             num_seg_classes: number of semantic segmentation classes
             backbone: dict config for Volt backbone
             freeze_backbone: whether to freeze backbone parameters
+            freeze_seg_head: whether to freeze semantic segmentation head (for transfer learning)
         """
         super().__init__()
         self.backbone_out_channels = backbone_out_channels
         self.num_seg_classes = num_seg_classes
         self.freeze_backbone = freeze_backbone
+        self.freeze_seg_head = freeze_seg_head
 
         # MODIFIED: Build Volt backbone
         from pointcept.models.builder import build_model
@@ -60,8 +63,14 @@ class VoltArticulate(nn.Module):
             nn.Linear(backbone_out_channels, 1),
         )
 
+        # MODIFIED: Freeze backbone if requested (transfer learning)
         if freeze_backbone:
             for p in self.backbone.parameters():
+                p.requires_grad = False
+
+        # MODIFIED: Freeze semantic seg head if requested (transfer learning)
+        if freeze_seg_head:
+            for p in self.seg_head.parameters():
                 p.requires_grad = False
 
     def forward(self, data_dict):
@@ -99,6 +108,7 @@ class ArticulateSegmentor(nn.Module):
         articulation_criteria=None,
         articulation_weight=0.5,
         freeze_backbone=False,
+        freeze_seg_head=False,  # MODIFIED: NEW - option to freeze semantic seg head
     ):
         """
         Args:
@@ -109,6 +119,7 @@ class ArticulateSegmentor(nn.Module):
             articulation_criteria: loss config for articulation tasks
             articulation_weight: weight of articulation loss relative to seg loss
             freeze_backbone: freeze backbone parameters
+            freeze_seg_head: freeze semantic segmentation head (transfer learning)
         """
         super().__init__()
         self.articulation_weight = articulation_weight
@@ -119,6 +130,7 @@ class ArticulateSegmentor(nn.Module):
             num_seg_classes=num_classes,
             backbone=backbone,
             freeze_backbone=freeze_backbone,
+            freeze_seg_head=freeze_seg_head,  # MODIFIED: pass parameter
         )
 
         # MODIFIED: Build loss criteria
