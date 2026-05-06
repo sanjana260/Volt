@@ -80,3 +80,61 @@ class ScanNetPPDataset(DefaultDataset):
         else:
             raise NotImplementedError
         return data_dict
+
+
+# ===== MODIFIED: Extended dataset with articulation labels =====
+@DATASETS.register_module()
+class ScanNetPPArticulateDataset(ScanNetPPDataset):
+    """Extended ScanNetPPDataset with articulation labels (movable, interactable)."""
+
+    VALID_ASSETS = [
+        "coord",
+        "color",
+        "normal",
+        "superpoint",
+        "segment",
+        "instance",
+        "movable_label",  # MODIFIED: added for articulation
+        "interactable_label",  # MODIFIED: added for articulation
+    ]
+
+    def __init__(
+        self,
+        multilabel=False,
+        articulation_root=None,  # MODIFIED: path to articulation labels
+        **kwargs,
+    ):
+        super().__init__(multilabel=multilabel, **kwargs)
+        self.articulation_root = articulation_root
+
+    def get_data(self, idx):
+        data_dict = super().get_data(idx)
+        num_points = data_dict["coord"].shape[0]
+        scene_id = data_dict["name"]
+
+        # MODIFIED: Load articulation labels if available
+        data_dict["has_articulation"] = False
+        if self.articulation_root is not None:
+            movable_path = os.path.join(
+                self.articulation_root, f"{scene_id}_movable_label.npy"
+            )
+            interactable_path = os.path.join(
+                self.articulation_root, f"{scene_id}_interactable_label.npy"
+            )
+
+            if os.path.exists(movable_path) and os.path.exists(interactable_path):
+                data_dict["movable_label"] = np.load(movable_path).astype(np.int64)
+                data_dict["interactable_label"] = np.load(interactable_path).astype(
+                    np.int64
+                )
+                data_dict["has_articulation"] = True
+            else:
+                # No articulation labels for this scene
+                data_dict["movable_label"] = np.zeros(num_points, dtype=np.int64)
+                data_dict["interactable_label"] = np.zeros(num_points, dtype=np.int64)
+        else:
+            # No articulation root provided
+            data_dict["movable_label"] = np.zeros(num_points, dtype=np.int64)
+            data_dict["interactable_label"] = np.zeros(num_points, dtype=np.int64)
+
+        return data_dict
