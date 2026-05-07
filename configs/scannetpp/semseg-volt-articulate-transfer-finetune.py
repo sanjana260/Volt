@@ -19,14 +19,15 @@ _base_ = [
 ]
 
 # MODIFIED: Load pretrained Volt weights
-weight = "pretrained_volt.pth"  # CHANGE THIS to your checkpoint path
+resume = False # To restart training in case of failure
+weight = "/scratch/sm13117/my_volt/Volt/models/model_best.pth"  # CHANGE THIS to your checkpoint path
 
 # Training hyperparameters for fine-tuning
 batch_size = 16
 num_worker = 24
 enable_amp = True
 use_ema = True  # Can use EMA for fine-tuning
-epoch = 300  # Intermediate duration
+epoch = 150  # Intermediate duration
 eval_epoch = 30
 
 # MODIFIED: Model with frozen backbone, trainable heads
