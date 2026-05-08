@@ -116,6 +116,81 @@ class ArticulationLoss(nn.Module):
         return total_loss * self.loss_weight
 
 
+# ===== ADDED: Instance-level regression losses =====
+
+def axis_loss(pred_axes, gt_axes):
+    """Cosine loss with ±axis ambiguity handling.
+
+    A rotation axis of [0,1,0] is identical to [0,-1,0], so we take
+    the absolute value of cosine similarity before computing the loss.
+
+    Args:
+        pred_axes: (N, 3) unit vectors (already normalised by AxisHead)
+        gt_axes:   (N, 3) unit vectors
+    """
+    cos_sim = F.cosine_similarity(pred_axes, gt_axes, dim=-1)  # (N,)
+    return (1.0 - cos_sim.abs()).mean()
+
+
+def origin_loss(pred_origins, gt_origins, gt_axes):
+    """Point-to-line distance loss.
+
+    Any point on the axis line is an equally valid GT origin, so
+    point-to-point distance would penalise correct predictions that
+    lie on the axis but far from the stored GT point.
+    Point-to-line distance measures the perpendicular offset only.
+
+    Distance from point P to line (Q, d):
+        perp = (P - Q) - ((P - Q) · d) * d
+
+    Args:
+        pred_origins: (N, 3)
+        gt_origins:   (N, 3)
+        gt_axes:      (N, 3) unit vectors
+    """
+    diff = pred_origins - gt_origins                              # (N, 3)
+    proj = (diff * gt_axes).sum(-1, keepdim=True) * gt_axes      # (N, 3)
+    perp = diff - proj                                           # (N, 3)
+    return perp.norm(dim=-1).mean()
+
+
+def artic_regression_loss(
+    pred_axes,
+    pred_origins,
+    artic_instances,
+    valid,
+    lambda_axis=1.0,
+    lambda_origin=0.5,
+):
+    """Compute combined axis + origin regression loss.
+
+    Args:
+        pred_axes:       (N_valid, 3) predicted unit axes
+        pred_origins:    (N_valid, 3) predicted origin points
+        artic_instances: list of instance dicts (motion_type, axis, origin, ...)
+        valid:           (N_inst,) bool tensor — which instances survived voxelization
+        lambda_axis:     weight for axis loss
+        lambda_origin:   weight for origin loss
+    """
+    if pred_axes is None or len(pred_axes) == 0:
+        return torch.tensor(0.0, device=pred_axes.device if pred_axes is not None else None)
+
+    device = pred_axes.device
+
+    gt_axes = torch.stack(
+        [torch.tensor(inst["axis"], dtype=torch.float32) for inst in artic_instances]
+    ).to(device)[valid]  # (N_valid, 3)
+
+    gt_origins = torch.stack(
+        [torch.tensor(inst["origin"], dtype=torch.float32) for inst in artic_instances]
+    ).to(device)[valid]  # (N_valid, 3)
+
+    L_axis = axis_loss(pred_axes, gt_axes)
+    L_origin = origin_loss(pred_origins, gt_origins, gt_axes)
+
+    return lambda_axis * L_axis + lambda_origin * L_origin
+
+
 @LOSSES.register_module()
 class BinaryCrossEntropyWithDiceLoss(nn.Module):
     """Binary cross-entropy + Dice loss for part segmentation."""

@@ -121,9 +121,8 @@ data = dict(
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment"),
+                keys=("coord", "grid_coord", "segment", "movable_label", "interactable_label", "artic_instance_label", "has_articulation"),
                 feat_keys=("color", "normal"),
-                extra_keys=("movable_label", "interactable_label", "has_articulation"),
             ),
         ],
         test_mode=False,
@@ -148,9 +147,8 @@ data = dict(
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment"),
+                keys=("coord", "grid_coord", "segment", "movable_label", "interactable_label", "artic_instance_label", "has_articulation"),
                 feat_keys=("color", "normal"),
-                extra_keys=("movable_label", "interactable_label", "has_articulation"),
             ),
         ],
         test_mode=False,

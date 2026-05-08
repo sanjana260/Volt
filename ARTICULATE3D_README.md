@@ -4,11 +4,13 @@ This document describes the implementation of additional classification heads fo
 
 ## Overview
 
-The implementation adds two auxiliary segmentation heads to the Volt backbone:
-1. **Movable Part Segmentation** (3 classes): Predicts whether each point is part of a movable object and its motion type (rotation/translation)
-2. **Interactable Part Segmentation** (binary): Predicts whether each point is part of an interactable object (handle, knob, etc.)
+The implementation adds four auxiliary heads to the Volt backbone:
+1. **Movable Part Segmentation** (3 classes): Predicts whether each point is fixed, rotatable, or translatable
+2. **Interactable Part Segmentation** (binary): Predicts whether each point is an interactable surface (handle, knob, switch)
+3. **Axis Direction Regression** (per-instance): Predicts a unit-vector axis of motion for each articulated instance
+4. **Axis Origin Regression** (per-instance): Predicts a point on the motion axis for each articulated instance
 
-These heads are trained jointly with the primary semantic segmentation task using a combined loss function.
+Heads 1–2 are point-level; heads 3–4 are instance-level (mean-pooled features). All four are trained jointly with semantic segmentation.
 
 ## Dataset Structure
 
@@ -16,20 +18,22 @@ These heads are trained jointly with the primary semantic segmentation task usin
 
 ```
 data/
-├── scannetpp/                          # ScanNet++ base data (existing)
+├── scannetpp/                              # ScanNet++ base data (existing)
 │   ├── train/
 │   │   ├── [scene_id]/
-│   │   │   ├── coord.npy               # Point coordinates
-│   │   │   ├── color.npy               # Point colors
-│   │   │   ├── normal.npy              # Point normals
-│   │   │   ├── segment.npy             # Semantic labels
-│   │   │   └── instance.npy            # Instance labels
+│   │   │   ├── coord.npy                   # Point coordinates
+│   │   │   ├── color.npy                   # Point colors
+│   │   │   ├── normal.npy                  # Point normals
+│   │   │   ├── segment.npy                 # Semantic labels
+│   │   │   └── instance.npy                # Instance labels
 │   └── val/
 │   └── test/
 │
-└── articulate3d_labels/                # Preprocessed articulation labels (NEW)
-    ├── [scene_id]_movable_label.npy    # Per-point movable labels
-    └── [scene_id]_interactable_label.npy
+└── articulate3d_labels/                    # Preprocessed articulation labels (NEW)
+    ├── [scene_id]_movable_label.npy        # Per-point movable labels {0,1,2}
+    ├── [scene_id]_interactable_label.npy   # Per-point interactable labels {0,1}
+    ├── [scene_id]_artic_instance_label.npy # Per-point instance IDs (0=bg, N=instance N)
+    └── [scene_id]_artic_instances.pkl      # Per-instance axis/origin metadata
 ```
 
 ### Articulation Label Format
@@ -42,6 +46,22 @@ data/
 **interactable_label.npy**: (N,) int64 array
 - `0`: Non-interactable
 - `1`: Interactable (handle, knob, etc.)
+
+**artic_instance_label.npy**: (N,) int64 array
+- `0`: Background (no articulated instance)
+- `k`: Point belongs to the k-th articulated instance (1-indexed)
+
+**artic_instances.pkl**: list of dicts, one per articulated instance
+```python
+{
+    "instance_id": int,           # 1-indexed
+    "label": str,                 # part label string
+    "motion_type": int,           # 1=rotation, 2=translation
+    "axis": np.ndarray,           # (3,) unit vector — axis of motion
+    "origin": np.ndarray,         # (3,) point on the motion axis
+    "vertex_mask": np.ndarray,    # (V,) bool — mesh vertices in this instance
+}
+```
 
 ## Setup Instructions
 
@@ -72,9 +92,11 @@ python tools/preprocess_articulate3d.py \
   - `artic.json`: Articulation metadata (motion type, etc.)
 - `scannetpp_root`: Must contain aligned meshes at `[scene_id]/mesh_aligned_0.05.ply`
 
-**Output:**
-- Creates `.npy` files for each scene with per-vertex labels
-- Files are named `{scene_id}_movable_label.npy` and `{scene_id}_interactable_label.npy`
+**Output (4 files per scene):**
+- `{scene_id}_movable_label.npy` — per-vertex motion type
+- `{scene_id}_interactable_label.npy` — per-vertex interactability
+- `{scene_id}_artic_instance_label.npy` — per-vertex instance IDs
+- `{scene_id}_artic_instances.pkl` — per-instance axis/origin metadata
 
 ### 3. Update Configuration
 
@@ -124,11 +146,15 @@ Key hyperparameters in `semseg-volt-articulate.py`:
 ```python
 # Model
 freeze_backbone = False      # Set to True if joint training hurts base performance
-articulation_weight = 0.5    # Loss weight relative to semantic segmentation
+articulation_weight = 0.5    # Loss weight for segmentation heads (movable+interactable)
 
-# Articulation Loss
+# Articulation segmentation loss
 lambda_dice = 1.0            # Dice loss weight
 lambda_ce = 1.0              # Cross-entropy loss weight
+
+# Regression loss (axis + origin)
+lambda_axis = 1.0            # Weight for axis direction loss
+lambda_origin = 0.5          # Weight for axis origin loss (harder; start lower)
 
 # Training
 batch_size = 16              # Batch size per GPU
@@ -140,17 +166,24 @@ optimizer = dict(type="AdamW", lr=0.001, weight_decay=0.05)
 
 **Loss Function:**
 ```
-L_total = L_seg + λ_artic × (L_movable + L_interactable)
+L_total = L_seg + λ_artic × (L_movable + L_interactable) + L_regression
 
 where:
-  L_movable = λ_ce × BCE + λ_dice × Dice
-  L_interactable = λ_ce × BCE + λ_dice × Dice
+  L_movable     = λ_ce × BCE + λ_dice × Dice   (per-point, binary: movable vs fixed)
+  L_interactable = λ_ce × BCE + λ_dice × Dice  (per-point, binary)
+  L_regression  = λ_axis × L_axis + λ_origin × L_origin  (per-instance)
+
+  L_axis   = mean(1 - |cos(pred_axis, gt_axis)|)   ← abs handles ±direction ambiguity
+  L_origin = mean(‖(pred_origin − gt_origin) − proj‖)  ← perpendicular-to-axis distance
+             where proj = ((pred−gt)·axis) × axis
 ```
 
 **Key Features:**
 - Mixed batch training: Scenes with/without articulation labels in same batch
-- Articulation loss only computed on scenes with labels (via `has_articulation` flag)
-- Gradient checkpointing enabled for efficient memory usage
+- Articulation loss only computed on scenes with `has_articulation=True`
+- Instance features pooled by mean over `artic_instance_label` voxels (post-GridSample)
+- `OriginHead` predicts offsets from instance centroid (more stable than absolute coords)
+- `artic_instances` metadata saved/restored around the transform pipeline (not transformed)
 - Exponential moving average (EMA) for model weights
 
 ## Inference & Submission
@@ -204,11 +237,17 @@ Predictions are saved as pickle files with structure:
    - Handles missing labels gracefully with `has_articulation` flag
 
 2. **pointcept/models/volt/volt_articulate.py** (NEW)
-   - `VoltArticulate`: Volt backbone with two auxiliary heads
-   - `ArticulateSegmentor`: Training/inference wrapper
+   - `pool_instance_features`: Mean-pools voxel features per instance using `artic_instance_label`
+   - `AxisHead`: MLP with LayerNorm + GELU; output L2-normalised to unit vector
+   - `OriginHead`: MLP conditioned on instance centroid; predicts offset → absolute origin
+   - `VoltArticulate`: Volt backbone with four auxiliary heads
+   - `ArticulateSegmentor`: Training/inference wrapper; calls `_run_regression` for axis/origin
 
 3. **pointcept/models/losses/articulation.py** (NEW)
-   - `ArticulationLoss`: Combined Dice + BCE loss
+   - `ArticulationLoss`: Combined Dice + BCE loss for movable/interactable heads
+   - `axis_loss`: Cosine-similarity loss with `abs()` for ±axis ambiguity
+   - `origin_loss`: Point-to-line perpendicular distance loss
+   - `artic_regression_loss`: Combines axis + origin losses for all valid instances
    - `BinaryCrossEntropyWithDiceLoss`: Utility loss
 
 4. **configs/scannetpp/semseg-volt-articulate.py** (NEW)
@@ -227,19 +266,28 @@ Predictions are saved as pickle files with structure:
                     │ Volt Backbone   │
                     │ (enc + dec)     │
                     └────────┬────────┘
-                             │ features (N, 128)
-                ┌────────────┼────────────┐
-                │            │            │
-         ┌──────▼──┐  ┌──────▼──┐  ┌──────▼──┐
-         │Seg Head │  │Movable  │  │Interact │
-         │(100 cls)│  │Head     │  │Head     │
-         │         │  │(3 cls)  │  │(1 cls)  │
-         └────┬────┘  └────┬────┘  └────┬────┘
-         seg_logits  movable_logits  interact_logits
-              │            │             │
-              └────────────┴─────────────┘
-                  ▼  ▼  ▼  (inference)
-              All 3 outputs returned
+                             │ point features (M, 128)
+          ┌──────────────────┼──────────────────┐
+          │                  │                  │
+   ┌──────▼──┐         ┌──────▼──┐        ┌──────▼──┐
+   │Seg Head │         │Movable  │        │Interact │
+   │(100 cls)│         │Head     │        │Head     │
+   │         │         │(3 cls)  │        │(1 cls)  │
+   └─────────┘         └─────────┘        └─────────┘
+   seg_logits        movable_logits    interactable_logits
+   (M, 100)          (M, 3)            (M, 1)
+
+   Instance pooling (via artic_instance_label):
+   point features (M, 128) → mean-pool per instance → (N_inst, 128)
+
+          ┌──────────────────┬──────────────────┐
+          │                  │                  │
+   ┌──────▼──────┐    ┌──────▼──────┐   inst centroids
+   │  Axis Head  │    │ Origin Head │   (N_inst, 3)
+   │  (MLP+norm) │    │  (MLP+cond) │◄──────────┘
+   └─────────────┘    └─────────────┘
+   axis_preds          origin_preds
+   (N_inst, 3)         (N_inst, 3)
 ```
 
 ## Performance Considerations

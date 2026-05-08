@@ -6,6 +6,7 @@ Please cite our work if the code is helpful to you.
 """
 
 import os
+import pickle
 import numpy as np
 import glob
 
@@ -82,26 +83,16 @@ class ScanNetPPDataset(DefaultDataset):
         return data_dict
 
 
-# ===== MODIFIED: Extended dataset with articulation labels =====
+# ===== MODIFIED: Extended dataset with articulation labels and instance metadata =====
 @DATASETS.register_module()
 class ScanNetPPArticulateDataset(ScanNetPPDataset):
-    """Extended ScanNetPPDataset with articulation labels (movable, interactable)."""
-
-    VALID_ASSETS = [
-        "coord",
-        "color",
-        "normal",
-        "superpoint",
-        "segment",
-        "instance",
-        "movable_label",  # MODIFIED: added for articulation
-        "interactable_label",  # MODIFIED: added for articulation
-    ]
+    """ScanNetPPDataset extended with per-point articulation labels and per-instance
+    axis/origin metadata for movable and interactable part segmentation."""
 
     def __init__(
         self,
         multilabel=False,
-        articulation_root=None,  # MODIFIED: path to articulation labels
+        articulation_root=None,
         **kwargs,
     ):
         super().__init__(multilabel=multilabel, **kwargs)
@@ -112,29 +103,51 @@ class ScanNetPPArticulateDataset(ScanNetPPDataset):
         num_points = data_dict["coord"].shape[0]
         scene_id = data_dict["name"]
 
-        # MODIFIED: Load articulation labels if available
-        data_dict["has_articulation"] = False
-        if self.articulation_root is not None:
-            movable_path = os.path.join(
-                self.articulation_root, f"{scene_id}_movable_label.npy"
-            )
-            interactable_path = os.path.join(
-                self.articulation_root, f"{scene_id}_interactable_label.npy"
-            )
+        # has_articulation: stored as a 0-dim numpy bool so it survives ToTensor
+        data_dict["has_articulation"] = np.bool_(False)
 
-            if os.path.exists(movable_path) and os.path.exists(interactable_path):
-                data_dict["movable_label"] = np.load(movable_path).astype(np.int64)
-                data_dict["interactable_label"] = np.load(interactable_path).astype(
-                    np.int64
-                )
-                data_dict["has_articulation"] = True
-            else:
-                # No articulation labels for this scene
-                data_dict["movable_label"] = np.zeros(num_points, dtype=np.int64)
-                data_dict["interactable_label"] = np.zeros(num_points, dtype=np.int64)
+        if self.articulation_root is None:
+            data_dict["movable_label"] = np.zeros(num_points, dtype=np.int64)
+            data_dict["interactable_label"] = np.zeros(num_points, dtype=np.int64)
+            data_dict["artic_instance_label"] = np.zeros(num_points, dtype=np.int64)
+            data_dict["artic_instances"] = []
+            return data_dict
+
+        root = self.articulation_root
+        movable_path = os.path.join(root, f"{scene_id}_movable_label.npy")
+        interactable_path = os.path.join(root, f"{scene_id}_interactable_label.npy")
+        instance_label_path = os.path.join(root, f"{scene_id}_artic_instance_label.npy")
+        instances_pkl_path = os.path.join(root, f"{scene_id}_artic_instances.pkl")
+
+        if os.path.exists(movable_path) and os.path.exists(interactable_path):
+            data_dict["movable_label"] = np.load(movable_path).astype(np.int64)
+            data_dict["interactable_label"] = np.load(interactable_path).astype(np.int64)
+            data_dict["has_articulation"] = np.bool_(True)
         else:
-            # No articulation root provided
             data_dict["movable_label"] = np.zeros(num_points, dtype=np.int64)
             data_dict["interactable_label"] = np.zeros(num_points, dtype=np.int64)
 
+        # Per-point instance ID — flows through GridSample voxelization like any other label
+        if os.path.exists(instance_label_path):
+            data_dict["artic_instance_label"] = np.load(instance_label_path).astype(np.int64)
+        else:
+            data_dict["artic_instance_label"] = np.zeros(num_points, dtype=np.int64)
+
+        # Per-instance metadata (axis/origin): variable-length list of dicts.
+        # NOT passed through transforms — re-attached in prepare_train_data.
+        if os.path.exists(instances_pkl_path):
+            with open(instances_pkl_path, "rb") as f:
+                data_dict["artic_instances"] = pickle.load(f)
+        else:
+            data_dict["artic_instances"] = []
+
+        return data_dict
+
+    def prepare_train_data(self, idx):
+        # Save artic_instances before the transform pipeline drops it (it's not a tensor)
+        data_dict = self.get_data(idx)
+        artic_instances = data_dict.get("artic_instances", [])
+        data_dict = self.transform(data_dict)
+        # Re-attach after Collect has filtered the dict
+        data_dict["artic_instances"] = artic_instances
         return data_dict

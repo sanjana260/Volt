@@ -128,10 +128,9 @@ data = dict(
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment"),
+                # MODIFIED: Labels in keys (copied as-is); extra_keys would torch.cat and break 1D arrays
+                keys=("coord", "grid_coord", "segment", "movable_label", "interactable_label", "artic_instance_label", "has_articulation"),
                 feat_keys=("color", "normal"),
-                # MODIFIED: Also collect articulation labels
-                extra_keys=("movable_label", "interactable_label", "has_articulation"),
             ),
         ],
         test_mode=False,
@@ -157,10 +156,8 @@ data = dict(
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment", "origin_segment", "inverse"),
+                keys=("coord", "grid_coord", "segment", "origin_segment", "inverse", "movable_label", "interactable_label", "artic_instance_label", "has_articulation"),
                 feat_keys=("color", "normal"),
-                # MODIFIED: Also collect articulation labels
-                extra_keys=("movable_label", "interactable_label", "has_articulation"),
             ),
         ],
         test_mode=False,

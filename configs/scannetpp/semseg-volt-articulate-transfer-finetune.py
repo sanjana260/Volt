@@ -73,6 +73,9 @@ model = dict(
     ),
     # Balanced weight for both tasks
     articulation_weight=0.5,
+    # MODIFIED: Regression loss weights (axis harder to learn; down-weight origin initially)
+    lambda_axis=1.0,
+    lambda_origin=0.5,
 )
 
 # MODIFIED: Lower learning rate for fine-tuning (prevent catastrophic forgetting)
@@ -134,9 +137,8 @@ data = dict(
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment"),
+                keys=("coord", "grid_coord", "segment", "movable_label", "interactable_label", "artic_instance_label", "has_articulation"),
                 feat_keys=("color", "normal"),
-                extra_keys=("movable_label", "interactable_label", "has_articulation"),
             ),
         ],
         test_mode=False,
@@ -162,9 +164,8 @@ data = dict(
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment", "origin_segment", "inverse"),
+                keys=("coord", "grid_coord", "segment", "origin_segment", "inverse", "movable_label", "interactable_label", "artic_instance_label", "has_articulation"),
                 feat_keys=("color", "normal"),
-                extra_keys=("movable_label", "interactable_label", "has_articulation"),
             ),
         ],
         test_mode=False,
